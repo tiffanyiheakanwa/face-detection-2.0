@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request
+from flask import Flask, render_template, request, jsonify
 from tensorflow.keras.models import load_model
 import numpy as np
 import cv2
@@ -13,13 +13,13 @@ app.config['UPLOAD_FOLDER'] = 'static/uploads'
 # Ensure upload folder exists
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
-# Load pre-trained model
+# Load your trained model
 model = load_model("face_emotionModel.h5")
 
-# Define emotion labels (adjust according to your model’s output order)
+# Define emotion labels
 emotions = ['Angry', 'Disgust', 'Fear', 'Happy', 'Sad', 'Surprise', 'Neutral']
 
-# Database setup
+# Initialize SQLite database
 def init_db():
     conn = sqlite3.connect('database.db')
     c = conn.cursor()
@@ -35,7 +35,7 @@ def init_db():
 
 init_db()
 
-# Function to predict emotion
+# Emotion prediction function
 def predict_emotion(img_path):
     img = cv2.imread(img_path)
     img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -48,37 +48,39 @@ def predict_emotion(img_path):
 # Routes
 @app.route('/')
 def index():
-    return render_template('index.html')
+    return render_template('index.html')  # Make sure index.html exists in a /templates folder
 
 @app.route('/predict', methods=['POST'])
 def predict():
-    name = request.form['name']
-    email = request.form['email']
-    file = request.files['image']
+    try:
+        name = request.form['name']
+        email = request.form['email']
+        file = request.files['image']
 
-    if file:
+        if not file:
+            return render_template('index.html', message="Please upload an image.")
+
         filename = secure_filename(file.filename)
         filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         file.save(filepath)
 
+        # Predict emotion
         emotion = predict_emotion(filepath)
         message = f"You are showing a {emotion.lower()} expression."
 
-        # Customize the message
-        if emotion == "Happy":
-            message += " Keep smiling!"
-        elif emotion == "Sad":
-            message = "You are frowning. Why are you sad?"
-        elif emotion == "Angry":
-            message += " Take a deep breath!"
-        elif emotion == "Fear":
-            message += " Don't be afraid, it's okay."
-        elif emotion == "Surprise":
-            message += " You seem surprised!"
-        else:
-            message += " Stay calm and relaxed."
+        # Add emotion-based message
+        responses = {
+            "Happy": "Keep smiling! 😊",
+            "Sad": "You look sad. Hope you feel better soon. 💙",
+            "Angry": "Take a deep breath — it’ll be okay. 😤",
+            "Fear": "Don't be afraid, you’re safe. 🤗",
+            "Surprise": "Wow, you seem surprised! 😲",
+            "Disgust": "Something seems off. 😕",
+            "Neutral": "Calm and collected — nice! 😌"
+        }
+        message += " " + responses.get(emotion, "")
 
-        # Save user info to database
+        # Save data to database
         conn = sqlite3.connect('database.db')
         c = conn.cursor()
         c.execute("INSERT INTO users (name, email, image_path, emotion) VALUES (?, ?, ?, ?)",
@@ -88,7 +90,11 @@ def predict():
 
         return render_template('index.html', message=message, filename=filepath)
 
-    return render_template('index.html', message="Please upload a valid image.")
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
+
+# Required for Render
 if __name__ == '__main__':
-    app.run(debug=True)
+    port = int(os.environ.get('PORT', 8000))
+    app.run(host='0.0.0.0', port=port)
