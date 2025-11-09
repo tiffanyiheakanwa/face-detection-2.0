@@ -1,9 +1,9 @@
 """
 Facial Emotion Detection Web Application
-Flask app that detects emotions from uploaded face images
+Optimized Flask app for Render deployment
 """
 
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, send_from_directory
 import os
 import sqlite3
 import base64
@@ -14,27 +14,33 @@ import io
 import tensorflow as tf
 from tensorflow import keras
 
-# Initialize Flask app
+# ======================================================
+# 🔧 Flask App Configuration
+# ======================================================
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
 app.config['UPLOAD_FOLDER'] = 'uploads'
-
-# Create uploads folder if it doesn't exist
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
-# Load the trained model
-print("Loading emotion detection model...")
+# ======================================================
+# 🧠 Load the Trained Model Once (Globally)
+# ======================================================
+print("🔄 Loading emotion detection model...")
 try:
     model = keras.models.load_model('face_emotionModel.h5')
-    print("✓ Model loaded successfully!")
+    # Optional: warm up the model to reduce first-request lag
+    dummy_input = np.zeros((1, 48, 48, 1))
+    model.predict(dummy_input, verbose=0)
+    print("✅ Model loaded and warmed up successfully!")
 except Exception as e:
-    print(f"✗ Error loading model: {e}")
+    print(f"❌ Error loading model: {e}")
     model = None
 
-# Emotion labels
+# ======================================================
+# 😃 Emotion Labels and Responses
+# ======================================================
 EMOTIONS = ['Angry', 'Disgust', 'Fear', 'Happy', 'Sad', 'Surprise', 'Neutral']
 
-# Emotion responses (what to say for each emotion)
 EMOTION_RESPONSES = {
     'Angry': "You look angry. What's bothering you? Take a deep breath! 😤",
     'Disgust': "You seem disgusted. Is something not right? 😖",
@@ -45,12 +51,12 @@ EMOTION_RESPONSES = {
     'Neutral': "You have a neutral expression. Feeling calm and collected! 😐"
 }
 
-# Database setup
+# ======================================================
+# 🗄️ Database Setup
+# ======================================================
 def init_db():
-    """Initialize the SQLite database"""
     conn = sqlite3.connect('database.db')
     cursor = conn.cursor()
-    
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS students (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -62,212 +68,128 @@ def init_db():
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    
     conn.commit()
     conn.close()
-    print("✓ Database initialized!")
+    print("✅ Database initialized!")
 
-# Initialize database on startup
 init_db()
 
+# ======================================================
+# 🧩 Helper Functions
+# ======================================================
 def preprocess_image(image):
-    """
-    Preprocess the uploaded image for model prediction
-    - Converts to grayscale
-    - Resizes to 48x48
-    - Normalizes pixel values
-    """
-    # Convert to grayscale
-    image = image.convert('L')
-    
-    # Resize to 48x48 (model input size)
-    image = image.resize((48, 48))
-    
-    # Convert to numpy array
-    img_array = np.array(image)
-    
-    # Normalize pixel values to 0-1
-    img_array = img_array / 255.0
-    
-    # Reshape for model input: (1, 48, 48, 1)
-    img_array = img_array.reshape(1, 48, 48, 1)
-    
-    return img_array
+    """Convert image to grayscale, resize, normalize, reshape"""
+    image = image.convert('L').resize((48, 48))
+    img_array = np.array(image) / 255.0
+    return img_array.reshape(1, 48, 48, 1)
 
 def predict_emotion(image):
-    """
-    Predict emotion from image using the trained model
-    Returns: (emotion_label, confidence)
-    """
+    """Predict emotion using the loaded model"""
     if model is None:
         return "Error", 0.0
-    
     try:
-        # Preprocess the image
-        processed_image = preprocess_image(image)
-        
-        # Make prediction
-        predictions = model.predict(processed_image, verbose=0)
-        
-        # Get the emotion with highest probability
-        emotion_index = np.argmax(predictions[0])
-        confidence = float(predictions[0][emotion_index])
-        emotion = EMOTIONS[emotion_index]
-        
-        return emotion, confidence
-    
+        processed = preprocess_image(image)
+        predictions = model.predict(processed, verbose=0)
+        idx = np.argmax(predictions[0])
+        return EMOTIONS[idx], float(predictions[0][idx])
     except Exception as e:
         print(f"Error during prediction: {e}")
         return "Error", 0.0
 
 def save_to_database(name, email, emotion, confidence, image_data):
-    """Save student data and emotion result to database"""
+    """Insert record into SQLite database"""
     try:
         conn = sqlite3.connect('database.db')
         cursor = conn.cursor()
-        
         cursor.execute('''
             INSERT INTO students (name, email, emotion, confidence, image_data)
             VALUES (?, ?, ?, ?, ?)
         ''', (name, email, emotion, confidence, image_data))
-        
         conn.commit()
         conn.close()
         return True
-    
     except Exception as e:
         print(f"Database error: {e}")
         return False
 
+# ======================================================
+# 🌐 Routes
+# ======================================================
 @app.route('/')
 def index():
-    """Render the main page"""
     return render_template('index.html')
+
+# ✅ Favicon route to prevent 404 in browser console
+@app.route('/favicon.ico')
+def favicon():
+    return send_from_directory(
+        os.path.join(app.root_path, 'static'),
+        'favicon.ico',
+        mimetype='image/vnd.microsoft.icon'
+    )
 
 @app.route('/predict', methods=['POST'])
 def predict():
-    """Handle image upload and emotion prediction"""
     try:
-        # Get form data
         name = request.form.get('name')
         email = request.form.get('email')
-        
-        # Validate form data
         if not name or not email:
-            return jsonify({
-                'success': False,
-                'error': 'Please fill in all fields!'
-            })
-        
-        # Get uploaded image
+            return jsonify({'success': False, 'error': 'Please fill in all fields!'})
+
         if 'image' not in request.files:
-            return jsonify({
-                'success': False,
-                'error': 'No image uploaded!'
-            })
-        
+            return jsonify({'success': False, 'error': 'No image uploaded!'})
+
         image_file = request.files['image']
-        
         if image_file.filename == '':
-            return jsonify({
-                'success': False,
-                'error': 'No image selected!'
-            })
-        
-        # Read and process the image
+            return jsonify({'success': False, 'error': 'No image selected!'})
+
         image_bytes = image_file.read()
         image = Image.open(io.BytesIO(image_bytes))
-        
-        # Convert image to base64 for storage
         image_base64 = base64.b64encode(image_bytes).decode('utf-8')
-        
-        # Predict emotion
+
         emotion, confidence = predict_emotion(image)
-        
         if emotion == "Error":
-            return jsonify({
-                'success': False,
-                'error': 'Error processing image. Please try again.'
-            })
-        
-        # Save to database
-        db_success = save_to_database(
-            name, email, emotion, confidence, image_base64
-        )
-        
+            return jsonify({'success': False, 'error': 'Error processing image. Please try again.'})
+
+        db_success = save_to_database(name, email, emotion, confidence, image_base64)
         if not db_success:
-            return jsonify({
-                'success': False,
-                'error': 'Error saving to database.'
-            })
-        
-        # Get emotion response message
-        response_message = EMOTION_RESPONSES.get(emotion, "Emotion detected!")
-        
-        # Return success response
+            return jsonify({'success': False, 'error': 'Error saving to database.'})
+
+        message = EMOTION_RESPONSES.get(emotion, "Emotion detected!")
         return jsonify({
             'success': True,
             'emotion': emotion,
             'confidence': round(confidence * 100, 2),
-            'message': response_message
+            'message': message
         })
-    
     except Exception as e:
         print(f"Error in predict route: {e}")
-        return jsonify({
-            'success': False,
-            'error': f'An error occurred: {str(e)}'
-        })
+        return jsonify({'success': False, 'error': f'An error occurred: {str(e)}'})
 
 @app.route('/stats')
 def stats():
-    """Display database statistics (optional feature)"""
     try:
         conn = sqlite3.connect('database.db')
         cursor = conn.cursor()
-        
-        # Get total submissions
         cursor.execute('SELECT COUNT(*) FROM students')
         total = cursor.fetchone()[0]
-        
-        # Get emotion distribution
-        cursor.execute('''
-            SELECT emotion, COUNT(*) as count 
-            FROM students 
-            GROUP BY emotion 
-            ORDER BY count DESC
-        ''')
-        emotion_stats = cursor.fetchall()
-        
+        cursor.execute('SELECT emotion, COUNT(*) FROM students GROUP BY emotion ORDER BY COUNT(*) DESC')
+        data = cursor.fetchall()
         conn.close()
-        
-        stats_html = f"""
-        <html>
-        <head><title>Statistics</title></head>
-        <body style="font-family: Arial; padding: 20px;">
-            <h1>Emotion Detection Statistics</h1>
-            <p><strong>Total Submissions:</strong> {total}</p>
-            <h2>Emotion Distribution:</h2>
-            <ul>
-        """
-        
-        for emotion, count in emotion_stats:
-            percentage = (count / total * 100) if total > 0 else 0
-            stats_html += f"<li>{emotion}: {count} ({percentage:.1f}%)</li>"
-        
-        stats_html += """
-            </ul>
-            <a href="/">Back to Home</a>
-        </body>
-        </html>
-        """
-        
-        return stats_html
-    
+
+        html = "<h1>Emotion Detection Stats</h1>"
+        html += f"<p><strong>Total Submissions:</strong> {total}</p><ul>"
+        for emotion, count in data:
+            percent = (count / total * 100) if total > 0 else 0
+            html += f"<li>{emotion}: {count} ({percent:.1f}%)</li>"
+        html += "</ul><a href='/'>Back to Home</a>"
+        return html
     except Exception as e:
         return f"Error: {e}"
 
+# ======================================================
+# 🚀 Run App
+# ======================================================
 if __name__ == '__main__':
-    # Run the app
     port = int(os.environ.get('PORT', 5000))
-    app.run(debug=False, host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=port, debug=False)
